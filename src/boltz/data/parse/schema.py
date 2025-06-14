@@ -1015,14 +1015,38 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
 
         # Get sequence
         if entity_type in {"protein", "dna", "rna"}:
-            seq = str(item[entity_type]["sequence"])
+            if "sequence" in item[entity_type]:
+                seq = str(item[entity_type]["sequence"])
+            elif "pdb" in item[entity_type]:
+                # Handle PDB file
+                pdb_path = Path(item[entity_type]["pdb"])
+                if len(pdb_path.stem) == 4 and pdb_path.stem.isalnum():
+                    # This is a PDB ID
+                    from boltz.data.parse.pdb_download import parse_pdb_id
+                    target = parse_pdb_id(pdb_path.stem, ccd, mol_dir, pdb_path.parent)
+                    seq = target["sequences"][0]["protein"]["sequence"]
+                else:
+                    # This is a PDB file
+                    from boltz.data.parse.pdb import parse_pdb
+                    target = parse_pdb(pdb_path, ccd, mol_dir)
+                    seq = target["sequences"][0]["protein"]["sequence"]
+            else:
+                msg = f"Protein must have either 'sequence' or 'pdb' field: {item}"
+                raise ValueError(msg)
         elif entity_type == "ligand":
-            assert "smiles" in item[entity_type] or "ccd" in item[entity_type]
-            assert "smiles" not in item[entity_type] or "ccd" not in item[entity_type]
             if "smiles" in item[entity_type]:
                 seq = str(item[entity_type]["smiles"])
-            else:
+            elif "sdf" in item[entity_type]:
+                # Handle SDF file
+                sdf_path = Path(item[entity_type]["sdf"])
+                from boltz.data.parse.sdf import parse_sdf
+                target = parse_sdf(sdf_path, ccd, mol_dir)
+                seq = target["sequences"][0]["ligand"]["smiles"]
+            elif "ccd" in item[entity_type]:
                 seq = str(item[entity_type]["ccd"])
+            else:
+                msg = f"Ligand must have 'smiles', 'sdf', or 'ccd' field: {item}"
+                raise ValueError(msg)
 
         # Group items by entity
         items_to_group.setdefault((entity_type, seq), []).append(item)
@@ -1147,7 +1171,25 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             unk_token = const.unk_token[entity_type.upper()]
 
             # Extract sequence
-            raw_seq = items[0][entity_type]["sequence"]
+            if "sequence" in items[0][entity_type]:
+                raw_seq = items[0][entity_type]["sequence"]
+            elif "pdb" in items[0][entity_type]:
+                # Handle PDB file
+                pdb_path = Path(items[0][entity_type]["pdb"])
+                if len(pdb_path.stem) == 4 and pdb_path.stem.isalnum():
+                    # This is a PDB ID
+                    from boltz.data.parse.pdb_download import parse_pdb_id
+                    target = parse_pdb_id(pdb_path.stem, ccd, mol_dir, pdb_path.parent)
+                    raw_seq = target["sequences"][0]["protein"]["sequence"]
+                else:
+                    # This is a PDB file
+                    from boltz.data.parse.pdb import parse_pdb
+                    target = parse_pdb(pdb_path, ccd, mol_dir)
+                    raw_seq = target["sequences"][0]["protein"]["sequence"]
+            else:
+                msg = f"Protein must have either 'sequence' or 'pdb' field: {items[0]}"
+                raise ValueError(msg)
+
             entity_to_seq[entity_id] = raw_seq
 
             # Convert sequence to tokens
@@ -1173,7 +1215,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             )
 
         # Parse a non-polymer
-        elif (entity_type == "ligand") and "ccd" in (items[0][entity_type]):
+        elif (entity_type == "ligand") and ("ccd" in items[0][entity_type]):
             seq = items[0][entity_type]["ccd"]
 
             if isinstance(seq, str):
@@ -1239,6 +1281,60 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             success = compute_3d_conformer(mol)
             if not success:
                 msg = f"Failed to compute 3D conformer for {seq}"
+                raise ValueError(msg)
+
+            mol_no_h = AllChem.RemoveHs(mol, sanitize=False)
+            affinity_mw = AllChem.Descriptors.MolWt(mol_no_h) if affinity else None
+            extra_mols[f"LIG{ligand_id}"] = mol_no_h
+            residue = parse_ccd_residue(
+                name=f"LIG{ligand_id}",
+                ref_mol=mol,
+                res_idx=0,
+            )
+
+            ligand_id += 1
+            parsed_chain = ParsedChain(
+                entity=entity_id,
+                residues=[residue],
+                type=const.chain_type_ids["NONPOLYMER"],
+                cyclic_period=0,
+                sequence=None,
+                affinity=affinity,
+                affinity_mw=affinity_mw,
+            )
+
+            assert not items[0][entity_type].get(
+                "cyclic", False
+            ), "Cyclic flag is not supported for ligands"
+
+        elif (entity_type == "ligand") and ("sdf" in items[0][entity_type]):
+            # Handle SDF file
+            sdf_path = Path(items[0][entity_type]["sdf"])
+            from boltz.data.parse.sdf import parse_sdf
+            target = parse_sdf(sdf_path, ccd, mol_dir)
+            mol = target["sequences"][0]["ligand"]["smiles"]
+
+            if affinity:
+                mol = standardize(mol)
+
+            mol = AllChem.MolFromSmiles(mol)
+            mol = AllChem.AddHs(mol)
+
+            # Set atom names
+            canonical_order = AllChem.CanonicalRankAtoms(mol)
+            for atom, can_idx in zip(mol.GetAtoms(), canonical_order):
+                atom_name = atom.GetSymbol().upper() + str(can_idx + 1)
+                if len(atom_name) > 4:
+                    msg = (
+                        f"{mol} has an atom with a name longer than "
+                        f"4 characters: {atom_name}."
+                    )
+                    raise ValueError(msg)
+                atom.SetProp("name", atom_name)
+
+            success = compute_3d_conformer(mol)
+            if not success:
+                msg = f"Failed to compute 3D conformer for {mol}"
                 raise ValueError(msg)
 
             mol_no_h = AllChem.RemoveHs(mol, sanitize=False)
