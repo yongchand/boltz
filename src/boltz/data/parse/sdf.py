@@ -26,11 +26,11 @@ def _process_sdf(sdf_path: str) -> dict[str, str]:
         Dictionary mapping molecule names to SMILES strings.
     """
     output_dict = {}
-    suppl = SDMolSupplier(sdf_path)
+    suppl = SDMolSupplier(sdf_path, removeHs=False, sanitize=False)
 
     for mol in suppl:
         if mol is not None:
-            mol_smiles = rdmolfiles.MolToSmiles(mol)
+            mol_smiles = rdmolfiles.MolToSmiles(mol, allHsExplicit=True)
             if mol.HasProp("_Name"):
                 mol_name = mol.GetProp("_Name")
                 if mol_name == "":

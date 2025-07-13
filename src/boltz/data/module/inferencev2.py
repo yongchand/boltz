@@ -30,6 +30,7 @@ def load_input(
     msa_dir: Path,
     constraints_dir: Optional[Path] = None,
     template_dir: Optional[Path] = None,
+    only_prediction: bool = False,
     extra_mols_dir: Optional[Path] = None,
     affinity: bool = False,
 ) -> Input:
@@ -60,9 +61,18 @@ def load_input(
     """
     # Load the structure
     if affinity:
-        structure = StructureV2.load(
+        if only_prediction:
+            #TODO: Formalize this
+            if target_dir.name == "predictions":
+                target_dir = target_dir.parent / "processed"
+            structure = StructureV2.load(
+                target_dir / f"structures/{record.id}.npz"
+                )
+        else:
+            structure = StructureV2.load(
             target_dir / record.id / f"pre_affinity_{record.id}.npz"
         )
+
     else:
         structure = StructureV2.load(target_dir / f"{record.id}.npz")
 
@@ -165,6 +175,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         mol_dir: Path,
         constraints_dir: Optional[Path] = None,
         template_dir: Optional[Path] = None,
+        only_prediction: bool = False,
         extra_mols_dir: Optional[Path] = None,
         override_method: Optional[str] = None,
         affinity: bool = False,
@@ -197,6 +208,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         self.tokenizer = Boltz2Tokenizer()
         self.featurizer = Boltz2Featurizer()
         self.canonicals = load_canonicals(self.mol_dir)
+        self.only_prediction = only_prediction
         self.extra_mols_dir = extra_mols_dir
         self.override_method = override_method
         self.affinity = affinity
@@ -222,6 +234,7 @@ class PredictionDataset(torch.utils.data.Dataset):
             msa_dir=self.msa_dir,
             constraints_dir=self.constraints_dir,
             template_dir=self.template_dir,
+            only_prediction=self.only_prediction,
             extra_mols_dir=self.extra_mols_dir,
             affinity=self.affinity,
         )
@@ -323,6 +336,7 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
         constraints_dir: Optional[Path] = None,
         template_dir: Optional[Path] = None,
         extra_mols_dir: Optional[Path] = None,
+        only_prediction: bool = False,
         override_method: Optional[str] = None,
         affinity: bool = False,
     ) -> None:
@@ -359,6 +373,7 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
         self.constraints_dir = constraints_dir
         self.template_dir = template_dir
         self.extra_mols_dir = extra_mols_dir
+        self.only_prediction = only_prediction
         self.override_method = override_method
         self.affinity = affinity
 
@@ -378,6 +393,7 @@ class Boltz2InferenceDataModule(pl.LightningDataModule):
             mol_dir=self.mol_dir,
             constraints_dir=self.constraints_dir,
             template_dir=self.template_dir,
+            only_prediction=self.only_prediction,
             extra_mols_dir=self.extra_mols_dir,
             override_method=self.override_method,
             affinity=self.affinity,

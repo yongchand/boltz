@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boltz-vsynthes"
-version = "1.1.0"
+version = "0.1.13"
 requires-python = ">=3.10,<3.13"
 description = "Boltz for VSYNTHES"
 readme = "README.md"

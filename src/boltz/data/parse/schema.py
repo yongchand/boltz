@@ -1042,6 +1042,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                 from boltz.data.parse.sdf import parse_sdf
                 target = parse_sdf(sdf_path, ccd, mol_dir)
                 seq = target["sequences"][0]["ligand"]["smiles"]
+                print(seq)
             elif "ccd" in item[entity_type]:
                 seq = str(item[entity_type]["ccd"])
             else:

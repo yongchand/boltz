@@ -25,7 +25,7 @@ def split_sdf_to_individuals(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Read all molecules from input SDF
-    supplier = Chem.SDMolSupplier(str(input_sdf))
+    supplier = Chem.SDMolSupplier(str(input_sdf), removeHs=False, sanitize=False)
     molecules = [mol for mol in supplier if mol is not None]
     total_molecules = len(molecules)
     

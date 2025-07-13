@@ -63,7 +63,7 @@ class Boltz2(LightningModule):
         num_val_datasets: int = 1,
         atom_feature_dim: int = 128,
         template_args: Optional[dict] = None,
-        confidence_prediction: bool = True,
+        confidence_prediction: bool = True, #TODO: change to False
         affinity_prediction: bool = False,
         affinity_ensemble: bool = False,
         affinity_mw_correction: bool = True,

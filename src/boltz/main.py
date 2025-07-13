@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 
 import click
 import torch
@@ -18,6 +18,8 @@ from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_only
 from rdkit import Chem
 from tqdm import tqdm
+import time
+from datetime import datetime
 
 from boltz.data import const
 from boltz.data.module.inference import BoltzInferenceDataModule
@@ -203,22 +205,21 @@ def download_boltz2(cache: Path) -> None:
         The cache directory.
 
     """
+    # Use /tmp if possible for faster local disk I/O
+    if str(cache).startswith("/home") or str(cache).startswith("/mnt"):
+        cache = Path("/tmp/boltz_cache")
+    cache.mkdir(parents=True, exist_ok=True)
+
     # Download CCD
     mols = cache / "mols"
     tar_mols = cache / "mols.tar"
-    if not tar_mols.exists():
+    if not mols.exists():
         click.echo(
-            f"Downloading the CCD data to {tar_mols}. "
+            f"Downloading and extracting the CCD data to {mols}. "
             "This may take a bit of time. You may change the cache directory "
             "with the --cache flag."
         )
         urllib.request.urlretrieve(MOL_URL, str(tar_mols))  # noqa: S310
-    if not mols.exists():
-        click.echo(
-            f"Extracting the CCD data to {mols}. "
-            "This may take a bit of time. You may change the cache directory "
-            "with the --cache flag."
-        )
         with tarfile.open(str(tar_mols), "r") as tar:
             tar.extractall(cache)  # noqa: S202
 
@@ -297,18 +298,17 @@ def check_inputs(data: Path) -> list[Path]:
     if data.is_dir():
         data: list[Path] = list(data.glob("*"))
 
-        # Filter out non .fasta or .yaml files, raise
-        # an error on directory and other file types
+        # Filter out non .fasta or .yaml files, skip directories and other file types
+        filtered_data = []
         for d in data:
             if d.is_dir():
-                msg = f"Found directory {d} instead of .fasta or .yaml."
-                raise RuntimeError(msg)
+                print(f"Warning: Skipping directory {d} - only .fasta or .yaml files are supported.")
+                continue
             if d.suffix not in (".fa", ".fas", ".fasta", ".yml", ".yaml"):
-                msg = (
-                    f"Unable to parse filetype {d.suffix}, "
-                    "please provide a .fasta or .yaml file."
-                )
-                raise RuntimeError(msg)
+                print(f"Warning: Skipping file {d} with unsupported extension {d.suffix} - only .fasta or .yaml files are supported.")
+                continue
+            filtered_data.append(d)
+        data = filtered_data
     else:
         data = [data]
 
@@ -934,6 +934,11 @@ def cli() -> None:
     is_flag=True,
     help="Whether to disable the kernels. Default False",
 )
+@click.option(
+    "--only_prediction",
+    is_flag=True,
+    help="Run only prediction. Default False",
+)
 def predict(  # noqa: C901, PLR0915, PLR0912
     data: str,
     out_dir: str,
@@ -967,6 +972,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     subsample_msa: bool = True,
     num_subsampled_msa: int = 1024,
     no_kernels: bool = False,
+    only_prediction: bool = False,
 ) -> None:
     """Run predictions with Boltz."""
     # If cpu, write a friendly warning
@@ -983,6 +989,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     torch.set_grad_enabled(False)
 
     # Ignore matmul precision warning
+    # torch.set_float32_matmul_precision('medium')
     torch.set_float32_matmul_precision("highest")
 
     # Set rdkit pickle logic
@@ -1029,14 +1036,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             msg = f"Method {method} not supported. Supported: {method_names}"
             raise ValueError(msg)
 
-    # Process inputs
+    # 1. Before and after process_inputs
+    t_process_inputs = time.time()
     ccd_path = cache / "ccd.pkl"
     mol_dir = cache / "mols"
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting process_inputs...")
     process_inputs(
         data=data,
         out_dir=out_dir,
-        ccd_path=ccd_path,
-        mol_dir=mol_dir,
+        ccd_path=cache / "ccd.pkl",
+        mol_dir=cache / "mols",
         use_msa_server=use_msa_server,
         msa_server_url=msa_server_url,
         msa_pairing_strategy=msa_pairing_strategy,
@@ -1044,18 +1053,27 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         preprocessing_threads=preprocessing_threads,
         max_msa_seqs=max_msa_seqs,
     )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] process_inputs finished in {time.time() - t_process_inputs:.2f} seconds")
 
-    # Load manifest
+    # 2. Before and after load manifest
+    t_manifest = time.time()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading manifest...")
     manifest = Manifest.load(out_dir / "processed" / "manifest.json")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Manifest loaded in {time.time() - t_manifest:.2f} seconds")
 
-    # Filter out existing predictions
+    # 3. Before and after Filter out existing predictions
+    t_filter = time.time()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Filtering out existing predictions...")
     filtered_manifest = filter_inputs_structure(
         manifest=manifest,
         outdir=out_dir,
         override=override,
     )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Filtering finished in {time.time() - t_filter:.2f} seconds")
 
-    # Load processed data
+    # 4. Before and after load processed data
+    t_processed = time.time()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading processed data...")
     processed_dir = out_dir / "processed"
     processed = BoltzProcessedInput(
         manifest=filtered_manifest,
@@ -1075,8 +1093,22 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             (processed_dir / "mols") if (processed_dir / "mols").exists() else None
         ),
     )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Processed data loaded in {time.time() - t_processed:.2f} seconds")
 
-    # Set up trainer
+    # 5. Before and after create prediction writer
+    t_writer = time.time()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Creating prediction writer...")
+    pred_writer = BoltzWriter(
+        data_dir=processed.targets_dir,
+        output_dir=out_dir / "predictions",
+        output_format=output_format,
+        boltz2=model == "boltz2",
+    )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Prediction writer created in {time.time() - t_writer:.2f} seconds")
+
+    # 6. Before and after set up trainer
+    t_trainer = time.time()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Setting up trainer...")
     strategy = "auto"
     if (isinstance(devices, int) and devices > 1) or (
         isinstance(devices, list) and len(devices) > 1
@@ -1129,13 +1161,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         devices=devices,
         precision=32 if model == "boltz1" else "bf16-mixed",
     )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Trainer set up in {time.time() - t_trainer:.2f} seconds")
 
     if filtered_manifest.records:
         msg = f"Running structure prediction for {len(filtered_manifest.records)} input"
         msg += "s." if len(filtered_manifest.records) > 1 else "."
         click.echo(msg)
 
-        # Create data module
+        # 7. Before and after create data module
+        t_datamodule = time.time()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Creating data module...")
         if model == "boltz2":
             data_module = Boltz2InferenceDataModule(
                 manifest=processed.manifest,
@@ -1146,6 +1181,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
                 constraints_dir=processed.constraints_dir,
                 template_dir=processed.template_dir,
                 extra_mols_dir=processed.extra_mols_dir,
+                only_prediction=only_prediction,
                 override_method=method,
             )
         else:
@@ -1156,14 +1192,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
                 num_workers=num_workers,
                 constraints_dir=processed.constraints_dir,
             )
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Data module created in {time.time() - t_datamodule:.2f} seconds")
 
-        # Load model
+        # 8. Before and after load model
+        t_model = time.time()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading model...")
         if checkpoint is None:
             if model == "boltz2":
                 checkpoint = cache / "boltz2_conf.ckpt"
             else:
                 checkpoint = cache / "boltz1_conf.ckpt"
-
         predict_args = {
             "recycling_steps": recycling_steps,
             "sampling_steps": sampling_steps,
@@ -1173,11 +1211,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             "write_full_pae": write_full_pae,
             "write_full_pde": write_full_pde,
         }
-
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
         steering_args.guidance_update = use_potentials
-
         model_cls = Boltz2 if model == "boltz2" else Boltz1
         model_module = model_cls.load_from_checkpoint(
             checkpoint,
@@ -1192,13 +1228,18 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             steering_args=asdict(steering_args),
         )
         model_module.eval()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Model loaded in {time.time() - t_model:.2f} seconds")
 
-        # Compute structure predictions
-        trainer.predict(
-            model_module,
-            datamodule=data_module,
-            return_predictions=False,
-        )
+        if not only_prediction:
+            # 9. Before and after compute structure predictions (predict)
+            t_predict = time.time()
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Computing structure predictions...")
+            trainer.predict(
+                model_module,
+                datamodule=data_module,
+                return_predictions=False,
+            )
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Structure predictions computed in {time.time() - t_predict:.2f} seconds")
 
     # Check if affinity predictions are needed
     if any(r.affinity for r in manifest.records):
@@ -1232,6 +1273,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             num_workers=num_workers,
             constraints_dir=processed.constraints_dir,
             template_dir=processed.template_dir,
+            only_prediction=only_prediction,
             extra_mols_dir=processed.extra_mols_dir,
             override_method="other",
             affinity=True,
@@ -1271,7 +1313,6 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             datamodule=data_module,
             return_predictions=False,
         )
-
 
 if __name__ == "__main__":
     cli()
